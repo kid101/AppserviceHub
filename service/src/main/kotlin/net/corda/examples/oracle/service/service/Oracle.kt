@@ -1,12 +1,21 @@
 package net.corda.examples.oracle.service.service
 
+import co.paralleluniverse.fibers.Suspendable
 import net.corda.core.contracts.Command
 import net.corda.core.crypto.TransactionSignature
-import net.corda.core.node.ServiceHub
+import net.corda.core.flows.FlowLogic
+import net.corda.core.flows.StartableByService
+import net.corda.core.node.AppServiceHub
 import net.corda.core.node.services.CordaService
 import net.corda.core.serialization.SingletonSerializeAsToken
 import net.corda.core.transactions.FilteredTransaction
+import net.corda.core.transactions.SignedTransaction
+import net.corda.core.utilities.OpaqueBytes
 import net.corda.examples.oracle.base.contract.PrimeContract
+import net.corda.finance.DOLLARS
+import net.corda.finance.flows.CashIssueFlow
+import net.corda.finance.flows.CashPaymentFlow
+import org.slf4j.LoggerFactory
 import java.math.BigInteger
 
 // We sub-class 'SingletonSerializeAsToken' to ensure that instances of this class are never serialised by Kryo.
@@ -19,7 +28,8 @@ import java.math.BigInteger
 // reference to the type of the object. When flows are de-serialised, the token is used to connect up the object
 // reference to an instance which should already exist on the stack.
 @CordaService
-class Oracle(val services: ServiceHub) : SingletonSerializeAsToken() {
+class Oracle(val services: AppServiceHub) : SingletonSerializeAsToken() {
+    private val logger = LoggerFactory.getLogger(Oracle::class.java);
     private val myKey = services.myInfo.legalIdentities.first().owningKey
 
     // Generates a list of natural numbers and filters out the non-primes.
@@ -33,6 +43,9 @@ class Oracle(val services: ServiceHub) : SingletonSerializeAsToken() {
     // Returns the Nth prime for N > 0.
     fun query(n: Int): Int {
         require(n > 0) { "n must be at least one." } // URL param is n not N.
+        logger.info("starting issue and transfer")
+        services.startFlow(DummyServiceFlow()).returnValue.toCompletableFuture().get();// If I Don't wait for the result it would work. Not sure if it's an intended functionality.
+        logger.info("done")
         return primes.take(n).last()
     }
 
@@ -64,6 +77,19 @@ class Oracle(val services: ServiceHub) : SingletonSerializeAsToken() {
             return services.createSignature(ftx, myKey)
         } else {
             throw IllegalArgumentException("Oracle signature requested over invalid transaction.")
+        }
+    }
+
+    @StartableByService
+    class DummyServiceFlow : FlowLogic<SignedTransaction>() {
+
+        @Suspendable
+        override fun call(): SignedTransaction {
+            logger.info("starting issuance")
+            // We call a subFlow, otehrwise there is no chance to subscribe to the ProgressTracker
+            subFlow(CashIssueFlow(100.DOLLARS, OpaqueBytes.of(1), serviceHub.networkMapCache.notaryIdentities.first()))
+            logger.info("issuance done")
+            return subFlow(CashPaymentFlow(100.DOLLARS, serviceHub.identityService.partiesFromName("PartyA", true).first())).stx;
         }
     }
 }
